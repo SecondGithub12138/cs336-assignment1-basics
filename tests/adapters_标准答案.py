@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import os
-import time
-import numpy.typing as npt
-import torch
-import regex
-import multiprocessing
-import functools
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
+
+import numpy.typing as npt
+import torch
+import regex as re
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-from collections import defaultdict, Counter
-from cs336_basics.pretokenization import find_chunk_boundaries
+from collections import defaultdict
+
 
 def run_linear(
     d_in: int,
@@ -565,23 +563,6 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
-def process_chunk(input_path: str, special_tokens: list[str], chunk: tuple[int]) -> Counter:
-    with open(input_path, "rb") as f:
-        f.seek(chunk[0])
-        chunk_text = f.read(chunk[1] - chunk[0]).decode("utf-8")
-        
-    counter: dict[tuple[bytes], int] = Counter()
-    # Strip lefted special_token leaved by find_chunk_boundaries().
-    # Hopefully there should be only 1 new chunk as chunk = new_chunk + special_token
-    special_tokens_str = "|".join(map(regex.escape, special_tokens))
-    for new_chunk in regex.split(special_tokens_str, chunk_text):
-        # print out new_chunk and chunk
-        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        for word in regex.finditer(PAT, new_chunk):
-            word_tuple = tuple(bytes([w]) for w in word.group().encode("utf-8"))
-            counter[word_tuple] += 1
-    return counter
-
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -610,134 +591,85 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    # Step 1: Initialize Vocabulary
+    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
+    next_id = 256
 
-    # Init vocab
-    vocab: dict[int, bytes] = {i : bytes([i]) for i in range(256)}
-    for tok in special_tokens:
-        vocab[len(vocab)] = tok.encode("utf-8")
+    for token in special_tokens:
+        vocab[next_id] = token.encode("utf-8")
+        next_id += 1
 
-    # Pre-tokenization
-    # =============================================Multi Process=============================================
-    # Seperate full text to documents and process Note: don't load the whole text into memory
-    words_counter: dict[tuple[bytes], int] = Counter()
-    with open(input_path, "rb") as f:
-        num_process = 4
-        boundaries = find_chunk_boundaries(f, num_process, b"<|endoftext|>")
-        with multiprocessing.Pool(processes=num_process) as pool:
-            counters = pool.imap_unordered(functools.partial(process_chunk, input_path, special_tokens), zip(boundaries[:-1], boundaries[1:]))
-            for counter in counters:
-                words_counter.update(counter)
-    # =============================================Single Process=============================================
+    # Step 2: Pre-tokenization
+    def to_bytes_tuple(word: str) -> tuple[bytes]:
+        encoded = word.encode("utf-8")
+        return tuple(bytes([e]) for e in encoded)
+
     # GPT-2 pre-tokenization pattern
-    # def to_bytes_tuple(word: str) -> tuple[bytes]:
-    #     encoded = word.encode("utf-8")
-    #     return tuple(bytes([e]) for e in encoded)
+    PAT = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
     
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    print(f"| Original special_tokens: {special_tokens}")
+    chunks = re.split("|".join(map(re.escape, special_tokens)), text)
 
-    # PAT = regex.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-    
-    # with open(input_path, "r", encoding="utf-8") as f:
-    #     text = f.read()
-    # # print(f"| Original special_tokens: {special_tokens}")
-    # chunks = regex.split("|".join(map(regex.escape, special_tokens)), text)
+    pre_tokens_cnt = defaultdict(int)
+    for chunk in chunks:
+        for match in re.finditer(PAT, chunk):
+            pre_tokens_cnt[to_bytes_tuple(match.group())] += 1   # key of pre_tokens_cnt e.g. (b'H', b'e', b'l', b'l', b'o')
 
-    # words_counter = defaultdict(int)
-    # for chunk in chunks:
-    #     for match in regex.finditer(PAT, chunk):
-    #         words_counter[to_bytes_tuple(match.group())] += 1   # key of pre_tokens_cnt e.g. (b'H', b'e', b'l', b'l', b'o')
-
-    # =============================================Single Process(End)=============================================
-    # Repeat for at most vocab_size time or when there is nothing to merge 
+    # Step 3: Compute BPE Merges
     merges = []
+
     while len(vocab) < vocab_size:
-        # Counter "byte" count globally
-        pairs_counter: dict[tuple[bytes], int] = Counter()
-        for word, count in words_counter.items():
-            for i in range(len(word) - 1):
-                pairs_counter[(word[i], word[i + 1])] += count
-        if not pairs_counter:
-            break
-        # Pick up the byte pair from candidates for merge, e.g. to_be_merge: (b'a, b'b)
-        to_be_merge = max(pairs_counter.items(), key = lambda x : (x[1], x[0][0], x[0][1]))[0]
-        # e.g b'ab OR b'\x61\x62'
-        new_token = to_be_merge[0] + to_be_merge[1]
-        merges.append(to_be_merge)
-        vocab[len(vocab)] = new_token
-        # Start merge. e.g. word: (b'a, b'b, c'c) OR (b'ab, c'c)
-        to_be_replace = []
-        for word, count in words_counter.items():
-            updated = False
-            new_word_list = []
-            i = 0
-            while i < len(word):
-                if word[i: i + 2] == to_be_merge:
-                    new_word_list.append(new_token)
-                    i += 2
-                    updated = True
-                else:
-                    new_word_list.append(word[i])
-                    i += 1
-            if updated:
-                to_be_replace.append((word, tuple(new_word_list), count))
-        for old_word_tuple, new_word_tuple, count in to_be_replace:
-            del words_counter[old_word_tuple]
-            words_counter[new_word_tuple] = count + words_counter.get(new_word_tuple, 0)
-    return (vocab, merges)
-    #=============================================Single Process=============================================
-    # time.sleep(1)
-    # merges = []
-    # next_id = 257
-    # while len(vocab) < vocab_size:
-    #     pair_counts = defaultdict(int)
+        pair_counts = defaultdict(int)
 
-    #     # Count all adjacent byte pairs
-    #     for token, cnt in words_counter.items():
-    #         for i in range(len(token) - 1):
-    #             pair = (token[i], token[i + 1])
-    #             pair_counts[pair] += cnt
+        # Count all adjacent byte pairs
+        for token, cnt in pre_tokens_cnt.items():
+            for i in range(len(token) - 1):
+                pair = (token[i], token[i + 1])
+                pair_counts[pair] += cnt
 
-    #     if not pair_counts:
-    #         break  # No more pairs to merge
+        if not pair_counts:
+            break  # No more pairs to merge
 
-    #     # Find the most frequent pair(s)
-    #     max_count = max(pair_counts.values())
-    #     candidates = [k for k, v in pair_counts.items() if v == max_count]
-    #     best_pair = max(candidates)
+        # Find the most frequent pair(s)
+        max_count = max(pair_counts.values())
+        candidates = [k for k, v in pair_counts.items() if v == max_count]
+        best_pair = max(candidates)
 
-    #     a, b = best_pair
+        a, b = best_pair
 
-    #     # Create new token
-    #     new_token = a + b
-    #     vocab[next_id] = new_token
-    #     next_id += 1
+        # Create new token
+        new_token = a + b
+        vocab[next_id] = new_token
+        next_id += 1
 
-    #     # Apply the merge to all pre-tokenized sequences
-    #     # 收集变更
-    #     changes = []
-    #     for token, cnt in words_counter.items():
-    #         # Find all occurrences of the `best_pair` in `token`
-    #         indices = [i for i in range(len(token) - 1) if token[i:i + 2] == best_pair]
-    #         if indices:
-    #             # Replace each occurrence with `new_token`
-    #             new_pre_token = []
-    #             i = 0
-    #             while i < len(token):
-    #                 if i in indices:
-    #                     new_pre_token.append(new_token)
-    #                     i += 2
-    #                 else:
-    #                     new_pre_token.append(token[i])
-    #                     i += 1
-    #             new_pre_token = tuple(new_pre_token)
-    #             changes.append((token, new_pre_token, cnt))
+        # Apply the merge to all pre-tokenized sequences
+        # 收集变更
+        changes = []
+        for token, cnt in pre_tokens_cnt.items():
+            # Find all occurrences of the `best_pair` in `token`
+            indices = [i for i in range(len(token) - 1) if token[i:i + 2] == best_pair]
+            if indices:
+                # Replace each occurrence with `new_token`
+                new_pre_token = []
+                i = 0
+                while i < len(token):
+                    if i in indices:
+                        new_pre_token.append(new_token)
+                        i += 2
+                    else:
+                        new_pre_token.append(token[i])
+                        i += 1
+                new_pre_token = tuple(new_pre_token)
+                changes.append((token, new_pre_token, cnt))
 
-    #     # 应用变更
-    #     for old_token, new_pre_token, cnt in changes:
-    #         words_counter[new_pre_token] = words_counter.get(new_pre_token, 0) + cnt
-    #         del words_counter[old_token]
+        # 应用变更
+        for old_token, new_pre_token, cnt in changes:
+            pre_tokens_cnt[new_pre_token] = pre_tokens_cnt.get(new_pre_token, 0) + cnt
+            del pre_tokens_cnt[old_token]
 
-    #     # Record the merge
-    #     merges.append((a, b))
+        # Record the merge
+        merges.append((a, b))
 
-    # return vocab, merges
-    #=============================================Single Process(End)=============================================
+    return vocab, merges
