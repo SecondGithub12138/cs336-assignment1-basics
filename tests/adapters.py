@@ -7,7 +7,9 @@ import torch
 import regex
 import multiprocessing
 import functools
-from collections.abc import Iterable
+import math
+import pickle
+from collections.abc import Iterable, Iterator
 from typing import IO, Any, BinaryIO
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
@@ -24,16 +26,47 @@ def run_linear(
     Given the weights of a Linear layer, compute the transformation of a batched input.
 
     Args:
-        in_dim (int): The size of the input dimension
-        out_dim (int): The size of the output dimension
+        d_in (int): The size of the input dimension
+        d_out (int): The size of the output dimension
         weights (Float[Tensor, "d_out d_in"]): The linear weights to use
-        in_features (Float[Tensor, "... d_in"]): The output tensor to apply the function to
+        in_features (Float[Tensor, "... d_in"]): The input tensor to apply the function to
 
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    linear = Linear(d_in, d_out)
+    with torch.no_grad():
+        linear.weight.copy_(weights)
+    return linear(in_features)
+    
+class Embedding:
+    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+        pass
 
-    raise NotImplementedError
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        pass
+
+class Linear(torch.nn.Module):
+    def __init__(self, d_in, d_out, device=None, dtype=None):
+        """
+        Args:
+            in_features: int final dimension of the input
+            out_features: int final dimension of the output
+            device: torch.device | None = None Device to store the parameters on 
+            dtype: torch.dtype | None = None Data type of the parameters
+        """
+        super().__init__()
+        self.d_in = d_in
+        self.d_out = d_out
+        W = torch.empty(d_out, d_in, device=device, dtype=dtype)
+        mean = 1
+        std = math.sqrt(2/(d_in + d_out))
+        torch.nn.init.trunc_normal_(W, mean, std, -3*std, 3*std)
+        self.weight = torch.nn.Parameter(W)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x @ self.weight.T
+        
 
 
 def run_embedding(
@@ -563,13 +596,13 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
 def process_chunk(input_path: str, special_tokens: list[str], chunk: tuple[int]) -> Counter:
     with open(input_path, "rb") as f:
         f.seek(chunk[0])
         chunk_text = f.read(chunk[1] - chunk[0]).decode("utf-8")
-        
+    
     counter: dict[tuple[bytes], int] = Counter()
     # Strip lefted special_token leaved by find_chunk_boundaries().
     # Hopefully there should be only 1 new chunk as chunk = new_chunk + special_token
@@ -581,6 +614,25 @@ def process_chunk(input_path: str, special_tokens: list[str], chunk: tuple[int])
             word_tuple = tuple(bytes([w]) for w in word.group().encode("utf-8"))
             counter[word_tuple] += 1
     return counter
+
+def _print_timing_summary(phase_times: dict[str, float], vocab_size: int, num_merges: int) -> None:
+    """Print detailed timing breakdown of BPE training phases."""
+    print(f"         ✓ Completed in {phase_times['merging_total']:.2f}s")
+    print(f"           - Pair counting: {phase_times['merging_pair_counting']:.2f}s ({100*phase_times['merging_pair_counting']/phase_times['merging_total']:.1f}%)")
+    print(f"           - Merge updates: {phase_times['merging_update']:.2f}s ({100*phase_times['merging_update']/phase_times['merging_total']:.1f}%)")
+    print(f"         Final vocab size: {vocab_size:,} tokens ({num_merges:,} merges)")
+
+    # Print timing summary
+    print("   [4/4] Training complete!")
+    total_time = sum(phase_times.values())
+    print(f"\n   ⏱️  Detailed timing breakdown:")
+    print(f"         - Vocab init:        {phase_times['vocab_init']:8.2f}s ({100*phase_times['vocab_init']/total_time:5.1f}%)")
+    print(f"         - Pre-tokenization:  {phase_times['pre_tokenization']:8.2f}s ({100*phase_times['pre_tokenization']/total_time:5.1f}%)")
+    print(f"         - BPE merging:       {phase_times['merging_total']:8.2f}s ({100*phase_times['merging_total']/total_time:5.1f}%)")
+    print(f"           ├─ Pair counting:  {phase_times['merging_pair_counting']:8.2f}s ({100*phase_times['merging_pair_counting']/total_time:5.1f}%)")
+    print(f"           └─ Merge updates:  {phase_times['merging_update']:8.2f}s ({100*phase_times['merging_update']/total_time:5.1f}%)")
+    print(f"         ─────────────────────────────────")
+    print(f"         Total:               {total_time:8.2f}s (100.0%)")
 
 
 def run_train_bpe(
@@ -611,17 +663,26 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
 
+    # Timing setup
+    phase_times = {}
+
     # Init vocab
+    print("   [1/4] Initializing vocabulary...")
+    t0 = time.time()
     vocab: dict[int, bytes] = {i : bytes([i]) for i in range(256)}
     for tok in special_tokens:
         vocab[len(vocab)] = tok.encode("utf-8")
+    phase_times["vocab_init"] = time.time() - t0
+    print(f"         ✓ Completed in {phase_times['vocab_init']:.2f}s")
 
     # Pre-tokenization
+    print("   [2/4] Pre-tokenization and counting...")
+    t0 = time.time()
     # =============================================Multi Process=============================================
     # Seperate full text to documents and process Note: don't load the whole text into memory
     words_counter: dict[tuple[bytes], int] = Counter()
     with open(input_path, "rb") as f:
-        num_process = 4
+        num_process = 4 
         boundaries = find_chunk_boundaries(f, num_process, b"<|endoftext|>")
         with multiprocessing.Pool(processes=num_process) as pool:
             counters = pool.imap_unordered(functools.partial(process_chunk, input_path, special_tokens), zip(boundaries[:-1], boundaries[1:]))
@@ -645,12 +706,22 @@ def run_train_bpe(
     # for chunk in chunks:
     #     for match in regex.finditer(PAT, chunk):
     #         words_counter[to_bytes_tuple(match.group())] += 1   # key of pre_tokens_cnt e.g. (b'H', b'e', b'l', b'l', b'o')
-
     # =============================================Single Process(End)=============================================
-    # Repeat for at most vocab_size time or when there is nothing to merge 
+    # Repeat for at most vocab_size time or when there is nothing to merge
+    phase_times["pre_tokenization"] = time.time() - t0
+    print(f"         ✓ Completed in {phase_times['pre_tokenization']:.2f}s")
+    print(f"         Found {len(words_counter):,} unique words")
+    print("   [3/4] BPE merging iterations...")
+    t0 = time.time()
     merges = []
+
+    # Track time for different parts of merge loop
+    time_pair_counting = 0
+    time_merge_update = 0
+
     while len(vocab) < vocab_size:
         # Counter "byte" count globally
+        t_pairs = time.time()
         pairs_counter: dict[tuple[bytes], int] = Counter()
         for word, count in words_counter.items():
             for i in range(len(word) - 1):
@@ -659,7 +730,10 @@ def run_train_bpe(
             break
         # Pick up the byte pair from candidates for merge, e.g. to_be_merge: (b'a, b'b)
         to_be_merge = max(pairs_counter.items(), key = lambda x : (x[1], x[0][0], x[0][1]))[0]
+        time_pair_counting += time.time() - t_pairs
+
         # e.g b'ab OR b'\x61\x62'
+        t_update = time.time()
         new_token = to_be_merge[0] + to_be_merge[1]
         merges.append(to_be_merge)
         vocab[len(vocab)] = new_token
@@ -682,62 +756,132 @@ def run_train_bpe(
         for old_word_tuple, new_word_tuple, count in to_be_replace:
             del words_counter[old_word_tuple]
             words_counter[new_word_tuple] = count + words_counter.get(new_word_tuple, 0)
+        time_merge_update += time.time() - t_update
+
+        # Progress update every 1000 merges
+        if len(merges) % 1000 == 0:
+            print(f"         Progress: {len(vocab):,}/{vocab_size:,} tokens ({len(merges):,} merges)")
+
+    phase_times["merging_total"] = time.time() - t0
+    phase_times["merging_pair_counting"] = time_pair_counting
+    phase_times["merging_update"] = time_merge_update
+    # Print timing summary
+    _print_timing_summary(phase_times, len(vocab), len(merges))
+
     return (vocab, merges)
-    #=============================================Single Process=============================================
-    # time.sleep(1)
-    # merges = []
-    # next_id = 257
-    # while len(vocab) < vocab_size:
-    #     pair_counts = defaultdict(int)
 
-    #     # Count all adjacent byte pairs
-    #     for token, cnt in words_counter.items():
-    #         for i in range(len(token) - 1):
-    #             pair = (token[i], token[i + 1])
-    #             pair_counts[pair] += cnt
+class Tokenizer:
+    @classmethod
+    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str]=None):
+        with open(vocab_filepath, "rb") as f:
+            vocab = pickle.load(f)
+        with open(merges_filepath, "rb") as f:
+            merges = pickle.load(f)
+        if special_tokens is None:
+            special_tokens = []
+        return cls(vocab, merges, special_tokens)
+        
+    def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str]):
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens if special_tokens is not None else []
+        self.merges_priorities: dict[tuple[bytes, bytes], int] = dict(zip(merges, range(len(merges))))
+        self.re_vocab: dict[bytes, int] = {v : k for k, v in vocab.items()}
+        for s_tokens in self.special_tokens:
+            if s_tokens.encode("utf-8") not in self.re_vocab:
+                token_id = len(self.vocab)
+                self.vocab[token_id] = s_tokens.encode("utf-8")
+                self.re_vocab[s_tokens.encode("utf-8")] = token_id
 
-    #     if not pair_counts:
-    #         break  # No more pairs to merge
+    def encode(self, text: str) -> list[int]:
+        # handle special tokens first
+        res: list[int] = []
+        sort_special_tokens = sorted(self.special_tokens, key=len, reverse=True)
+        pattern ="|".join(map(regex.escape, sort_special_tokens))
+        if pattern:
+            chunks = regex.split(f"({pattern})", text) 
+        else:
+            chunks = [text]
+        for chunk in chunks:
+            if chunk in sort_special_tokens:
+                res.append(self.re_vocab[chunk.encode("utf-8")])
+            else:
+                # encode the normal splited chunk
+                PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+                for word in regex.finditer(PAT, chunk):
+                    word_tuple = tuple(bytes([c]) for c in word.group().encode("utf-8"))
+                    while True:
+                        new_word_list = []
+                        if len(word_tuple) <= 1:
+                            break
+                        update_idx = min(range(len(word_tuple) - 1), key=lambda i : (self.merges_priorities.get(word_tuple[i: i + 2], math.inf)))
+                        if word_tuple[update_idx: update_idx + 2] not in self.merges_priorities:
+                            break
+                        idx = 0
+                        while idx < len(word_tuple):
+                            if idx == update_idx and idx + 1 < len(word_tuple):
+                                new_word_list.append(word_tuple[idx] + word_tuple[idx+1])
+                                idx += 2
+                            else:
+                                new_word_list.append(word_tuple[idx])
+                                idx += 1
+                        word_tuple = tuple(new_word_list)
+                    res.extend(self.re_vocab[word_byte] for word_byte in word_tuple)
+        return res
 
-    #     # Find the most frequent pair(s)
-    #     max_count = max(pair_counts.values())
-    #     candidates = [k for k, v in pair_counts.items() if v == max_count]
-    #     best_pair = max(candidates)
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for str in iterable:
+            for each in self.encode(str):
+                yield each
+    # usage: for token_id in tokenizer.encode(huge_text):
+    # process(token_id)
 
-    #     a, b = best_pair
+    def decode(self, ids: list[int]) -> str:
+        res = b""
+        for token_id in ids:
+            res += self.vocab[token_id]
+        return res.decode("utf-8", errors="replace")
 
-    #     # Create new token
-    #     new_token = a + b
-    #     vocab[next_id] = new_token
-    #     next_id += 1
+    def encode_large_file(
+        self,
+        file_path: str,
+        num_chunks: int = 4,
+        special_token_separator: bytes = b"<|endoftext|>"
+    ) -> Iterator[int]:
+        """
+        逐块读取大文件并编码，确保special token不被分割
 
-    #     # Apply the merge to all pre-tokenized sequences
-    #     # 收集变更
-    #     changes = []
-    #     for token, cnt in words_counter.items():
-    #         # Find all occurrences of the `best_pair` in `token`
-    #         indices = [i for i in range(len(token) - 1) if token[i:i + 2] == best_pair]
-    #         if indices:
-    #             # Replace each occurrence with `new_token`
-    #             new_pre_token = []
-    #             i = 0
-    #             while i < len(token):
-    #                 if i in indices:
-    #                     new_pre_token.append(new_token)
-    #                     i += 2
-    #                 else:
-    #                     new_pre_token.append(token[i])
-    #                     i += 1
-    #             new_pre_token = tuple(new_pre_token)
-    #             changes.append((token, new_pre_token, cnt))
+        Args:
+            file_path: 文件路径
+            num_chunks: 分块数量（用于控制每次读取的大小）
+            special_token_separator: 用于分割的special token（作为chunk边界）
 
-    #     # 应用变更
-    #     for old_token, new_pre_token, cnt in changes:
-    #         words_counter[new_pre_token] = words_counter.get(new_pre_token, 0) + cnt
-    #         del words_counter[old_token]
+        Yields:
+            int: 每个token ID
+        """
+        def chunk_generator():
+            with open(file_path, "rb") as f:
+                # 找到不会分割special token的边界
+                boundaries = find_chunk_boundaries(f, num_chunks, special_token_separator)
 
-    #     # Record the merge
-    #     merges.append((a, b))
+                # 逐个chunk处理
+                for i in range(len(boundaries) - 1):
+                    start, end = boundaries[i], boundaries[i + 1]
+                    f.seek(start)
+                    chunk_bytes = f.read(end - start)
+                    chunk_text = chunk_bytes.decode("utf-8")
+                    yield chunk_text
 
-    # return vocab, merges
-    #=============================================Single Process(End)=============================================
+        # 使用 encode_iterable 来处理每个chunk
+        for token_id in self.encode_iterable(chunk_generator()):
+            yield token_id
+
+
+
+
+
+
+
+
+
+    
