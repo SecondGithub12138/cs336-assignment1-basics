@@ -385,21 +385,23 @@ class TransformerBlock(torch.nn.Module):
         # multi head attention prep
         self.rmsnorm1 = RMSNorm(d_model)
         self.mha = MultiheadSelfAttention(d_model, num_heads, max_seq_len, theta)
-        with torch.no_grad():
-            self.rmsnorm1.weight.copy_(weights["ln1.weight"])
-            self.mha.q_proj_weight.copy_(weights["attn.q_proj.weight"])
-            self.mha.k_proj_weight.copy_(weights["attn.k_proj.weight"])
-            self.mha.v_proj_weight.copy_(weights["attn.v_proj.weight"])
-            self.mha.o_proj_weight.copy_(weights["attn.output_proj.weight"])
+        if weights is not None:
+            with torch.no_grad():
+                self.rmsnorm1.weight.copy_(weights["ln1.weight"])
+                self.mha.q_proj_weight.copy_(weights["attn.q_proj.weight"])
+                self.mha.k_proj_weight.copy_(weights["attn.k_proj.weight"])
+                self.mha.v_proj_weight.copy_(weights["attn.v_proj.weight"])
+                self.mha.o_proj_weight.copy_(weights["attn.output_proj.weight"])
         
         # FFN prep
         self.rmsnorm2 = RMSNorm(d_model)
         self.swiglu = SWIGLU(d_model, d_ff)
-        with torch.no_grad():
-            self.rmsnorm2.weight.copy_(weights["ln2.weight"])
-            self.swiglu.w1.copy_(weights["ffn.w1.weight"])
-            self.swiglu.w2.copy_(weights["ffn.w2.weight"])
-            self.swiglu.w3.copy_(weights["ffn.w3.weight"])
+        if weights is not None:
+            with torch.no_grad():
+                self.rmsnorm2.weight.copy_(weights["ln2.weight"])
+                self.swiglu.w1.copy_(weights["ffn.w1.weight"])
+                self.swiglu.w2.copy_(weights["ffn.w2.weight"])
+                self.swiglu.w3.copy_(weights["ffn.w3.weight"])
     
     def forward(self, in_features: Float[Tensor, " batch sequence_length d_model"]) -> Float[Tensor, " batch sequence_length d_model"]:
         seq_len = in_features.shape[-2]
@@ -498,34 +500,39 @@ def run_transformer_lm(
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
     # encoding 
     eb = Embedding(vocab_size, d_model)
-    with torch.no_grad():
-        eb.weight.copy_(weights["token_embeddings.weight"])
+    if weights is not None:
+        with torch.no_grad():
+            eb.weight.copy_(weights["token_embeddings.weight"])
     in_features = eb(in_indices)
     # transformer
     for i in range(num_layers):
-        layer_weights = {}
-        layer_weights["attn.q_proj.weight"] = weights[f"layers.{i}.attn.q_proj.weight"]
-        layer_weights["attn.k_proj.weight"] = weights[f"layers.{i}.attn.k_proj.weight"]
-        layer_weights["attn.v_proj.weight"] = weights[f"layers.{i}.attn.v_proj.weight"]
-        layer_weights["attn.output_proj.weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
-        layer_weights["ln1.weight"] = weights[f"layers.{i}.ln1.weight"]
-        layer_weights["ln2.weight"] = weights[f"layers.{i}.ln2.weight"]
-        layer_weights["ffn.w1.weight"] = weights[f"layers.{i}.ffn.w1.weight"]
-        layer_weights["ffn.w2.weight"] = weights[f"layers.{i}.ffn.w2.weight"]
-        layer_weights["ffn.w3.weight"] = weights[f"layers.{i}.ffn.w3.weight"]
+        layer_weights = None
+        if weights is not None:
+            layer_weights = {}
+            layer_weights["attn.q_proj.weight"] = weights[f"layers.{i}.attn.q_proj.weight"]
+            layer_weights["attn.k_proj.weight"] = weights[f"layers.{i}.attn.k_proj.weight"]
+            layer_weights["attn.v_proj.weight"] = weights[f"layers.{i}.attn.v_proj.weight"]
+            layer_weights["attn.output_proj.weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
+            layer_weights["ln1.weight"] = weights[f"layers.{i}.ln1.weight"]
+            layer_weights["ln2.weight"] = weights[f"layers.{i}.ln2.weight"]
+            layer_weights["ffn.w1.weight"] = weights[f"layers.{i}.ffn.w1.weight"]
+            layer_weights["ffn.w2.weight"] = weights[f"layers.{i}.ffn.w2.weight"]
+            layer_weights["ffn.w3.weight"] = weights[f"layers.{i}.ffn.w3.weight"]
         transformer_block = TransformerBlock(d_model, num_heads, d_ff, max_seq_len=context_length, theta=rope_theta, weights=layer_weights)
         in_features = transformer_block(in_features)
     
     # Last Norm
     rmsnorm = RMSNorm(d_model)
-    with torch.no_grad():
-        rmsnorm.weight.copy_(weights["ln_final.weight"])
+    if weights is not None:
+        with torch.no_grad():
+            rmsnorm.weight.copy_(weights["ln_final.weight"])
     in_features = rmsnorm(in_features)
     
     # Linear
     linear = Linear(d_model, vocab_size)
-    with torch.no_grad():
-        linear.weight.copy_(weights["lm_head.weight"])
+    if weights is not None:
+        with torch.no_grad():
+            linear.weight.copy_(weights["lm_head.weight"])
     in_features = linear(in_features)
     # return softmax(in_features, -1)
     return in_features
