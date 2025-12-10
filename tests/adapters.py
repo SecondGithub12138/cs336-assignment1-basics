@@ -485,7 +485,63 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
+class TransformerLM(torch.nn.Module):
+    def __init__(
+        self, 
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        weights: dict[str, Tensor],
+    ) :
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.rope_theta = rope_theta
+        self.weights = weights
+        self.eb = Embedding(vocab_size, d_model)
+        if weights is not None:
+            with torch.no_grad():
+                self.eb.weight.copy_(weights["token_embeddings.weight"])
+        self.transformer_blocks = []
+        for i in range(num_layers):
+            layer_weights = None
+            if weights is not None:
+                layer_weights = {}
+                layer_weights["attn.q_proj.weight"] = weights[f"layers.{i}.attn.q_proj.weight"]
+                layer_weights["attn.k_proj.weight"] = weights[f"layers.{i}.attn.k_proj.weight"]
+                layer_weights["attn.v_proj.weight"] = weights[f"layers.{i}.attn.v_proj.weight"]
+                layer_weights["attn.output_proj.weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
+                layer_weights["ln1.weight"] = weights[f"layers.{i}.ln1.weight"]
+                layer_weights["ln2.weight"] = weights[f"layers.{i}.ln2.weight"]
+                layer_weights["ffn.w1.weight"] = weights[f"layers.{i}.ffn.w1.weight"]
+                layer_weights["ffn.w2.weight"] = weights[f"layers.{i}.ffn.w2.weight"]
+                layer_weights["ffn.w3.weight"] = weights[f"layers.{i}.ffn.w3.weight"]
+            self.transformer_blocks.append(TransformerBlock(d_model, num_heads, d_ff, max_seq_len=context_length, theta=rope_theta, weights=layer_weights))
+        self.rmsnorm = RMSNorm(d_model)
+        if weights is not None:
+            with torch.no_grad():
+                self.rmsnorm.weight.copy_(weights["ln_final.weight"])
+        self.linear = Linear(d_model, vocab_size)
+        if weights is not None:
+            with torch.no_grad():
+                self.linear.weight.copy_(weights["lm_head.weight"])
 
+    def forward(self, in_indices: Int[Tensor, " batch_size sequence_length"]
+    ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
+        in_features = self.eb(in_indices)
+        for transformer_block in self.transformer_blocks:
+            in_features = transformer_block(in_features)
+        in_features = self.rmsnorm(in_features)
+        in_features = self.linear(in_features)
+        return in_features
 
 def run_transformer_lm(
     vocab_size: int,
@@ -498,44 +554,46 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
-    # encoding 
-    eb = Embedding(vocab_size, d_model)
-    if weights is not None:
-        with torch.no_grad():
-            eb.weight.copy_(weights["token_embeddings.weight"])
-    in_features = eb(in_indices)
-    # transformer
-    for i in range(num_layers):
-        layer_weights = None
-        if weights is not None:
-            layer_weights = {}
-            layer_weights["attn.q_proj.weight"] = weights[f"layers.{i}.attn.q_proj.weight"]
-            layer_weights["attn.k_proj.weight"] = weights[f"layers.{i}.attn.k_proj.weight"]
-            layer_weights["attn.v_proj.weight"] = weights[f"layers.{i}.attn.v_proj.weight"]
-            layer_weights["attn.output_proj.weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
-            layer_weights["ln1.weight"] = weights[f"layers.{i}.ln1.weight"]
-            layer_weights["ln2.weight"] = weights[f"layers.{i}.ln2.weight"]
-            layer_weights["ffn.w1.weight"] = weights[f"layers.{i}.ffn.w1.weight"]
-            layer_weights["ffn.w2.weight"] = weights[f"layers.{i}.ffn.w2.weight"]
-            layer_weights["ffn.w3.weight"] = weights[f"layers.{i}.ffn.w3.weight"]
-        transformer_block = TransformerBlock(d_model, num_heads, d_ff, max_seq_len=context_length, theta=rope_theta, weights=layer_weights)
-        in_features = transformer_block(in_features)
+    transformer_lm = TransformerLM(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta, weights)
+    return transformer_lm(in_indices)
+    # # encoding 
+    # eb = Embedding(vocab_size, d_model)
+    # if weights is not None:
+    #     with torch.no_grad():
+    #         eb.weight.copy_(weights["token_embeddings.weight"])
+    # in_features = eb(in_indices)
+    # # transformer
+    # for i in range(num_layers):
+    #     layer_weights = None
+    #     if weights is not None:
+    #         layer_weights = {}
+    #         layer_weights["attn.q_proj.weight"] = weights[f"layers.{i}.attn.q_proj.weight"]
+    #         layer_weights["attn.k_proj.weight"] = weights[f"layers.{i}.attn.k_proj.weight"]
+    #         layer_weights["attn.v_proj.weight"] = weights[f"layers.{i}.attn.v_proj.weight"]
+    #         layer_weights["attn.output_proj.weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
+    #         layer_weights["ln1.weight"] = weights[f"layers.{i}.ln1.weight"]
+    #         layer_weights["ln2.weight"] = weights[f"layers.{i}.ln2.weight"]
+    #         layer_weights["ffn.w1.weight"] = weights[f"layers.{i}.ffn.w1.weight"]
+    #         layer_weights["ffn.w2.weight"] = weights[f"layers.{i}.ffn.w2.weight"]
+    #         layer_weights["ffn.w3.weight"] = weights[f"layers.{i}.ffn.w3.weight"]
+    #     transformer_block = TransformerBlock(d_model, num_heads, d_ff, max_seq_len=context_length, theta=rope_theta, weights=layer_weights)
+    #     in_features = transformer_block(in_features)
     
-    # Last Norm
-    rmsnorm = RMSNorm(d_model)
-    if weights is not None:
-        with torch.no_grad():
-            rmsnorm.weight.copy_(weights["ln_final.weight"])
-    in_features = rmsnorm(in_features)
+    # # Last Norm
+    # rmsnorm = RMSNorm(d_model)
+    # if weights is not None:
+    #     with torch.no_grad():
+    #         rmsnorm.weight.copy_(weights["ln_final.weight"])
+    # in_features = rmsnorm(in_features)
     
-    # Linear
-    linear = Linear(d_model, vocab_size)
-    if weights is not None:
-        with torch.no_grad():
-            linear.weight.copy_(weights["lm_head.weight"])
-    in_features = linear(in_features)
-    # return softmax(in_features, -1)
-    return in_features
+    # # Linear
+    # linear = Linear(d_model, vocab_size)
+    # if weights is not None:
+    #     with torch.no_grad():
+    #         linear.weight.copy_(weights["lm_head.weight"])
+    # in_features = linear(in_features)
+    # # return softmax(in_features, -1)
+    # return in_features
     """Given the weights of a Transformer language model and input indices,
     return the output of running a forward pass on the input indices.
 
