@@ -1237,9 +1237,9 @@ class Tokenizer:
         return res
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        for str in iterable:
-            for each in self.encode(str):
-                yield each
+        for chunk in iterable:
+            for token_id in self.encode(chunk):
+                yield token_id
     # usage: for token_id in tokenizer.encode(huge_text):
     # process(token_id)
 

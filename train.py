@@ -66,7 +66,7 @@ def main():
     # Others
     parser.add_argument("--device", type=str)
     parser.add_argument("--config", type=str)
-    parser.add_argument("--use_wandb", action="store_true")
+    # parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--log_interval", type=int)
 
     args = parser.parse_args()
@@ -76,7 +76,7 @@ def main():
         with open(args.config, 'r') as f:
             config = json.load(f)
     else:
-        with open("assignment1-basics/config_default.json", 'r') as f:
+        with open("config_default.json", 'r') as f:
             config = json.load(f)
 
     # Override with cli flag
@@ -84,17 +84,17 @@ def main():
         if v is not None:
             config[k] = v
     
-    if config["user_wandb"]:
+    if config["use_wandb"]:
         wandb_run = wandb.init(
-            project="CS336"
-            name="CZF training"
+            project="CS336",
+            name="CZF training",
             config=config
         )
     # 然后再看看怎么拼起来吧
     # 第一步先把文件load进来 training 
     print("Loading datasets...")
-    train_data = load_memmap_data(config["train-data"])
-    val_data = load_memmap_data(config["val-data"])
+    train_data = load_memmap_data(config["train_data"])
+    val_data = load_memmap_data(config["val_data"])
 
     # 接下来开始训练，
     # 首先一步load weights，最开始没有weight呀怎么办
@@ -102,22 +102,22 @@ def main():
     # 结果发现没有构建query 和 comparing， 去找train 和 val data吧
     
     step = 1
-    transformer_model = TransformerLM(config["vocab_size"], config["context_length"], config["d_model"], config["num_layers"], config["num_heads"], config["d_ff"], config["rope_theta"], None) 
-    adamw = AdamW(transformer_model.parameters, config["lr"], tuple(config["beta1"], config["beta2"]), config["eps"], config["weight_decay"])
-    if config["resume"]:
+    transformer_model = TransformerLM(config["vocab_size"], config["context_length"], config["d_model"], config["num_layers"], config["num_heads"], config["d_ff"], config["rope_theta"], None)
+    adamw = AdamW(transformer_model.parameters(), config["lr"], (config["beta1"], config["beta2"]), config["eps"], config["weight_decay"])
+    if config.get("resume"):
         step = run_load_checkpoint(config["resume"], transformer_model, adamw)
     while step <= config["max_steps"]:
         start_time = time.time()
         print(f"step is {step}")
-        batch = get_batch(train_data, config["batch_size"], config["context_length"], config["device"])
+        input, label = get_batch(train_data, config["batch_size"], config["context_length"], config["device"])
         # 1.前向传播 run_transformer_lm
         # in_indices: Int[Tensor, " batch_size sequence_length"]
-        logit = transformer_model(batch[0])
+        logit = transformer_model(input)
         # 2.计算loss run_cross_entropy
         # preprocess to flat 
-        logit = rearrange(logit, "batch_size context_length vocab_size -> (batch_size context_length) vocab_size", seq=config["context_length"])
-        target = rearrange(batch[1], "batch_size context_length -> (batch_size context_length)")
-        loss = cross_entropy(logit, target)
+        logit = rearrange(logit, "batch_size context_length vocab_size -> (batch_size context_length) vocab_size")
+        label = rearrange(label, "batch_size context_length -> (batch_size context_length)")
+        loss = cross_entropy(logit, label)
         # 3.反向传播 loss.backward()
         adamw.zero_grad()
         loss.backward()
@@ -128,27 +128,36 @@ def main():
             param_groups["lr"] = lr
         adamw.step()
         # logging | wandb
-        if config["user_wandb"] and step % config["log_interval"] == 0:
+        if config["use_wandb"] and step % config["log_interval"] == 0:
             val_loss = eval(val_data, config, transformer_model, EVAL_BATCH_NUM)
-            train_loss = eval(val_data, config, transformer_model, EVAL_BATCH_NUM)
-            wandb_run.log({
+            train_loss = eval(train_data, config, transformer_model, EVAL_BATCH_NUM)
+
+            log_data = {
                 "train/loss": loss.item(),
                 "train/lr": lr,
                 "step": step,
                 "step_time": time.time() - start_time,
                 "eval/train_loss": train_loss,
                 "eval/val_loss": val_loss,
-            })
+            }
+
+            # Print to terminal
+            print(f"[Step {step}] loss={loss.item():.4f}, lr={lr:.6f}, train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, time={time.time()-start_time:.2f}s")
+
+            # Log to wandb
+            wandb_run.log(log_data)
 
         if step % config["checkpoint_interval"] == 0:
             # 留个心眼看看这个到底是checkpoints/step_1是存在了哪个目录下，应该无论相对本py还是项目根目录都存在assignment1*下.. 看不出来
             checkpoint_dir = Path(config["checkpoint_dir"])
-            checkpoint_dir.mkdri(parents=True, exist_ok=True)
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
             run_save_checkpoint(transformer_model, adamw, step, f"{checkpoint_dir}/step_{step}" )
         step+=1
-        checkpoint_dir = Path(config["checkpoint_dir"])
-        checkpoint_dir.mkdri(parents=True, exist_ok=True)
-        run_save_checkpoint(transformer_model, adamw, step, f"{checkpoint_dir}/step_final" )
+
+    # Save final checkpoint after training loop
+    checkpoint_dir = Path(config["checkpoint_dir"])
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    run_save_checkpoint(transformer_model, adamw, step, f"{checkpoint_dir}/step_final" )
     # 还有eval 用上val_data
 
 @torch.no_grad()
@@ -161,7 +170,7 @@ def eval(dataset: np.ndarray, config: dict, transformer_model: torch.nn.Module, 
         logit = transformer_model(batch[0])
         # 2.计算loss run_cross_entropy
         # preprocess to flat 
-        logit = rearrange(logit, "batch_size context_length vocab_size -> (batch_size context_length) vocab_size", seq=config["context_length"])
+        logit = rearrange(logit, "batch_size context_length vocab_size -> (batch_size context_length) vocab_size")
         target = rearrange(batch[1], "batch_size context_length -> (batch_size context_length)")
         loss = cross_entropy(logit, target)
         losses.append(loss)
