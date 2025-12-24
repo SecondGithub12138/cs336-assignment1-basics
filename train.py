@@ -105,6 +105,8 @@ def main():
     transformer_model = TransformerLM(config["vocab_size"], config["context_length"], config["d_model"], config["num_layers"], config["num_heads"], config["d_ff"], config["rope_theta"], None)
     adamw = AdamW(transformer_model.parameters(), config["lr"], (config["beta1"], config["beta2"]), config["eps"], config["weight_decay"])
     if config.get("resume"):
+        resume_dir = config.get("resume")
+        print(f"read checkpoint {resume_dir}")
         step = run_load_checkpoint(config["resume"], transformer_model, adamw)
     while step <= config["max_steps"]:
         start_time = time.time()
@@ -152,6 +154,7 @@ def main():
             checkpoint_dir = Path(config["checkpoint_dir"])
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
             run_save_checkpoint(transformer_model, adamw, step, f"{checkpoint_dir}/step_{step}" )
+        print(f"[Step {step}] loss={loss.item():.4f}, lr={lr:.6f}, time={time.time()-start_time:.2f}s")
         step+=1
 
     # Save final checkpoint after training loop

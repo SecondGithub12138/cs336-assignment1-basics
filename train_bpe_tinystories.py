@@ -12,7 +12,8 @@ import json
 import pickle
 import psutil
 from pathlib import Path
-from tests.adapters import run_train_bpe
+# from tests.adapters import run_train_bpe  # Commented out - using Hugging Face tokenizers instead
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 
 
 def get_memory_usage_mb():
@@ -42,7 +43,9 @@ def main():
 
     # Configuration
     data_dir = Path("data")
-    input_path = data_dir / "TinyStoriesV2-GPT4-train.txt"
+    # input_path = data_dir / "test_train.txt"
+    input_path = data_dir / "owt_train_3gb.txt"
+    # input_path = data_dir / "TinyStoriesV2-GPT4-train.txt"
 
     # Extract base name from input file (e.g., "TinyStoriesV2-GPT4-valid")
     input_basename = input_path.stem
@@ -50,7 +53,7 @@ def main():
     output_dir = Path("outputs") / input_basename
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    vocab_size = 32_000
+    vocab_size = 10_000
     special_tokens = ["<|endoftext|>"]
 
     # Check if input file exists

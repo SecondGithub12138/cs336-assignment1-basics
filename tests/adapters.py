@@ -54,11 +54,7 @@ class Linear(torch.nn.Module):
         super().__init__()
         self.d_in = d_in
         self.d_out = d_out
-        W = torch.empty(d_out, d_in, device=device, dtype=dtype)
-        mean = 1
-        std = math.sqrt(2/(d_in + d_out))
-        torch.nn.init.trunc_normal_(W, mean, std, -3*std, 3*std)
-        self.weight = torch.nn.Parameter(W)
+        self.weight = xavier(d_out, d_in)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x @ self.weight.T
@@ -94,11 +90,7 @@ class Embedding(torch.nn.Module):
         self.embedding_dim = embedding_dim
         self.device = device
         self.dtype = dtype
-        W = torch.empty(num_embeddings, embedding_dim, device=device, dtype=dtype)
-        mean = 0
-        std = 1
-        torch.nn.init.trunc_normal_(W, mean, std, -3*std, 3*std)
-        self.weight = torch.nn.Parameter(W)
+        self.weight = xavier(num_embeddings, embedding_dim)
         
 
     def forward(self, token_ids: Int[Tensor, " ..."]) -> Float[Tensor, " ... d_model"]:
@@ -113,9 +105,9 @@ class SWIGLU(torch.nn.Module):
         # self.w1 = Linear(d_model, d_ff)  # d_model -> d_ff
         # self.w2 = Linear(d_ff, d_model)  # d_ff -> d_model
         # self.w3 = Linear(d_model, d_ff)  # d_model -> d_ff
-        self.w1 = torch.nn.Parameter(torch.empty(d_ff, d_model))
-        self.w2 = torch.nn.Parameter(torch.empty(d_model, d_ff))
-        self.w3 = torch.nn.Parameter(torch.empty(d_ff, d_model))
+        self.w1 = xavier(d_ff, d_model)
+        self.w2 = xavier(d_model, d_ff)
+        self.w3 = xavier(d_ff, d_model)
 
     def forward(self, x: Float[Tensor, "... d_model"]):
         # SwiGLU formula: (Swish(x @ W1) * (x @ W3)) @ W2
@@ -194,6 +186,12 @@ def run_scaled_dot_product_attention(
     """
     return scaled_dot_product_attention(Q, K, V, mask)
 
+def xavier(d_1: int, d_2: int) -> torch.nn.Parameter:
+    weight = torch.empty(d_1, d_2)
+    std = math.sqrt(2 / (d_1 + d_2))
+    torch.nn.init.trunc_normal_(weight, 0, std, -3*std, 3*std)
+    return torch.nn.Parameter(weight)
+
 class MultiheadSelfAttention(torch.nn.Module):
     def __init__(self, d_model: int, num_heads: int, max_seq_len: int = 0,
     theta: float = 0):
@@ -204,10 +202,10 @@ class MultiheadSelfAttention(torch.nn.Module):
         self.max_seq_len = max_seq_len #for rope
         self.theta = theta #for rope
         self.rope = RoPE(self.theta, self.d_k, self.max_seq_len, device=None)
-        self.q_proj_weight = torch.nn.Parameter(torch.empty(d_model, d_model))
-        self.k_proj_weight = torch.nn.Parameter(torch.empty(d_model, d_model))
-        self.v_proj_weight = torch.nn.Parameter(torch.empty(d_model, d_model))
-        self.o_proj_weight = torch.nn.Parameter(torch.empty(d_model, d_model))
+        self.q_proj_weight = xavier(d_model, d_model)
+        self.k_proj_weight = xavier(d_model, d_model)
+        self.v_proj_weight = xavier(d_model, d_model)
+        self.o_proj_weight = xavier(d_model, d_model)
     
     def forward(self, in_features: Float[Tensor, " ... sequence_length d_in"], mask: Bool[Tensor, " ... queries keys"] | None = None, token_positions: Int[Tensor, " ... sequence_length"] | None = None) -> Float[Tensor, " ... queries d_v"]:
         qkv_big_weight = torch.cat([self.q_proj_weight, self.k_proj_weight, self.v_proj_weight])
@@ -510,7 +508,7 @@ class TransformerLM(torch.nn.Module):
         if weights is not None:
             with torch.no_grad():
                 self.eb.weight.copy_(weights["token_embeddings.weight"])
-        self.transformer_blocks = []
+        self.transformer_blocks = torch.nn.ModuleList()
         for i in range(num_layers):
             layer_weights = None
             if weights is not None:
@@ -697,7 +695,7 @@ class RMSNorm(torch.nn.Module):
         self.eps = eps
         self.device = device
         self.dtype = dtype
-        W = torch.empty(d_model, device=device, dtype=dtype)
+        W = torch.ones(d_model, device=device, dtype=dtype)
         self.weight = torch.nn.Parameter(W)
 
     def forward(self, x: Float[Tensor, " ... d_model"]) -> Float[Tensor, " ... d_model"]:
@@ -724,7 +722,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    pass
 
 def get_batch(
     dataset: npt.NDArray, batch_size: int, context_length: int, device: str
@@ -1006,10 +1004,13 @@ def get_tokenizer(
     return Tokenizer(vocab, merges, special_tokens)
 
 def process_chunk(input_path: str, special_tokens: list[str], chunk: tuple[int]) -> Counter:
+    chunk_size_mb = (chunk[1] - chunk[0]) / (1024 * 1024)
+    print(f"         Processing chunk: {chunk_size_mb:.1f} MB at offset {chunk[0]/1e6:.1f}M")
+
     with open(input_path, "rb") as f:
         f.seek(chunk[0])
         chunk_text = f.read(chunk[1] - chunk[0]).decode("utf-8")
-    
+
     counter: dict[tuple[bytes], int] = Counter()
     # Strip lefted special_token leaved by find_chunk_boundaries().
     # Hopefully there should be only 1 new chunk as chunk = new_chunk + special_token
@@ -1020,6 +1021,8 @@ def process_chunk(input_path: str, special_tokens: list[str], chunk: tuple[int])
         for word in regex.finditer(PAT, new_chunk):
             word_tuple = tuple(bytes([w]) for w in word.group().encode("utf-8"))
             counter[word_tuple] += 1
+
+    print(f"         ✓ Finished chunk at offset {chunk[0]/1e6:.1f}M, found {len(counter)} unique word patterns")
     return counter
 
 def _print_timing_summary(phase_times: dict[str, float], vocab_size: int, num_merges: int) -> None:
@@ -1089,8 +1092,8 @@ def run_train_bpe(
     # Seperate full text to documents and process Note: don't load the whole text into memory
     words_counter: dict[tuple[bytes], int] = Counter()
     with open(input_path, "rb") as f:
-        num_process = 4 
-        boundaries = find_chunk_boundaries(f, num_process, b"<|endoftext|>")
+        num_process = 6 
+        boundaries = find_chunk_boundaries(f, 100 * num_process, b"<|endoftext|>")
         with multiprocessing.Pool(processes=num_process) as pool:
             counters = pool.imap_unordered(functools.partial(process_chunk, input_path, special_tokens), zip(boundaries[:-1], boundaries[1:]))
             for counter in counters:
@@ -1128,6 +1131,8 @@ def run_train_bpe(
 
     while len(vocab) < vocab_size:
         # Counter "byte" count globally
+        if len(merges) % 1 == 0:
+            print(f"         [Merge {len(merges)+1}] Step 1/3: Counting byte pairs across {len(words_counter):,} words...")
         t_pairs = time.time()
         pairs_counter: dict[tuple[bytes], int] = Counter()
         for word, count in words_counter.items():
@@ -1138,8 +1143,12 @@ def run_train_bpe(
         # Pick up the byte pair from candidates for merge, e.g. to_be_merge: (b'a, b'b)
         to_be_merge = max(pairs_counter.items(), key = lambda x : (x[1], x[0][0], x[0][1]))[0]
         time_pair_counting += time.time() - t_pairs
+        if len(merges) % 1 == 0:
+            print(f"         [Merge {len(merges)+1}] Step 2/3: Found most frequent pair (freq={pairs_counter[to_be_merge]:,}), time={time.time()-t_pairs:.1f}s")
 
         # e.g b'ab OR b'\x61\x62'
+        if len(merges) % 1 == 0:
+            print(f"         [Merge {len(merges)+1}] Step 3/3: Updating all words with this pair...")
         t_update = time.time()
         new_token = to_be_merge[0] + to_be_merge[1]
         merges.append(to_be_merge)
@@ -1164,10 +1173,16 @@ def run_train_bpe(
             del words_counter[old_word_tuple]
             words_counter[new_word_tuple] = count + words_counter.get(new_word_tuple, 0)
         time_merge_update += time.time() - t_update
+        if len(merges) % 1 == 0:
+            print(f"         [Merge {len(merges)+1}] Updated {len(to_be_replace):,} words, time={time.time()-t_update:.1f}s")
 
-        # Progress update every 1000 merges
-        if len(merges) % 1000 == 0:
-            print(f"         Progress: {len(vocab):,}/{vocab_size:,} tokens ({len(merges):,} merges)")
+        # Progress update every 100 merges
+        if len(merges) % 1 == 0:
+            elapsed = time.time() - t0
+            avg_time_per_merge = elapsed / len(merges) if len(merges) > 0 else 0
+            remaining_merges = vocab_size - len(vocab)
+            eta_seconds = avg_time_per_merge * remaining_merges
+            print(f"         Progress: {len(vocab):,}/{vocab_size:,} tokens ({len(merges):,} merges, {elapsed:.1f}s elapsed, ETA: {eta_seconds:.1f}s)")
 
     phase_times["merging_total"] = time.time() - t0
     phase_times["merging_pair_counting"] = time_pair_counting
