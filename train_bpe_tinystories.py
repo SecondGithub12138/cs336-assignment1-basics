@@ -12,8 +12,7 @@ import json
 import pickle
 import psutil
 from pathlib import Path
-# from tests.adapters import run_train_bpe  # Commented out - using Hugging Face tokenizers instead
-from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from tests.adapters import run_train_bpe
 
 
 def get_memory_usage_mb():
