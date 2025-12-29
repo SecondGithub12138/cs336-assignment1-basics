@@ -176,7 +176,7 @@ def eval(dataset: np.ndarray, config: dict, transformer_model: torch.nn.Module, 
         logit = rearrange(logit, "batch_size context_length vocab_size -> (batch_size context_length) vocab_size")
         target = rearrange(batch[1], "batch_size context_length -> (batch_size context_length)")
         loss = cross_entropy(logit, target)
-        losses.append(loss)
+        losses.append(loss.item())
     return np.mean(losses)
 
 
