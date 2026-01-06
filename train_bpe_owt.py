@@ -6,7 +6,7 @@ Train a BPE tokenizer on OWT dataset using Hugging Face tokenizers (fast Rust im
 import os
 import time
 from pathlib import Path
-from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers, decoders
 
 
 def main():
@@ -16,8 +16,10 @@ def main():
 
     # Configuration
     data_dir = Path("data")
-    input_path = data_dir / "owt_train.txt"
-    output_dir = Path("outputs") / "owt_tokenizer"
+    # input_path = data_dir / "owt_train.txt"
+    # output_dir = Path("outputs") / "owt_tokenizer"
+    input_path = data_dir / "TinyStoriesV2-GPT4-train.txt"
+    output_dir = Path("outputs") / "TinyStoriesV2-GPT4-train"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     vocab_size = 32_000
@@ -57,6 +59,9 @@ def main():
 
     training_time = time.time() - start_time
 
+    # Add ByteLevel decoder (IMPORTANT: converts ByteLevel tokens back to UTF-8)
+    tokenizer.decoder = decoders.ByteLevel()
+
     # Save tokenizer
     tokenizer_path = output_dir / "tokenizer.json"
     tokenizer.save(str(tokenizer_path))
@@ -65,6 +70,7 @@ def main():
     print(f"\n✅ Training completed!")
     print(f"   Time: {training_time:.2f}s ({training_time / 60:.2f}m)")
     print(f"   Vocab size: {tokenizer.get_vocab_size():,}")
+    print(f"   Decoder: ByteLevel (added)")
     print(f"   Saved to: {tokenizer_path}")
 
     print("\n" + "=" * 80)
