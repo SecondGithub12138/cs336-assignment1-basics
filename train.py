@@ -103,14 +103,17 @@ def main():
     
     step = 1
     transformer_model = TransformerLM(config["vocab_size"], config["context_length"], config["d_model"], config["num_layers"], config["num_heads"], config["d_ff"], config["rope_theta"], None)
+    # make sure everything under "cuda"!wget https://huggingface.co/datasets/chenwudi12138/owt.bin/resolve/main/owt_valid.bin
+    transformer_model = transformer_model.to(config["device"])
     adamw = AdamW(transformer_model.parameters(), config["lr"], (config["beta1"], config["beta2"]), config["eps"], config["weight_decay"])
     if config.get("resume"):
         resume_dir = config.get("resume")
         print(f"read checkpoint {resume_dir}")
         step = run_load_checkpoint(config["resume"], transformer_model, adamw)
+
+    batch_start_time = time.time()  # Track time for every 100 steps
     while step <= config["max_steps"]:
         start_time = time.time()
-        print(f"step is {step}")
         input, label = get_batch(train_data, config["batch_size"], config["context_length"], config["device"])
         # 1.前向传播 run_transformer_lm
         # in_indices: Int[Tensor, " batch_size sequence_length"]
@@ -154,7 +157,10 @@ def main():
             checkpoint_dir = Path(config["checkpoint_dir"])
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
             run_save_checkpoint(transformer_model, adamw, step, f"{checkpoint_dir}/step_{step}" )
-        print(f"[Step {step}] loss={loss.item():.4f}, lr={lr:.6f}, time={time.time()-start_time:.2f}s")
+        if step % 100 == 0:
+            batch_time = time.time() - batch_start_time
+            print(f"[Step {step}] loss={loss.item():.4f}, lr={lr:.6f}, time={batch_time:.2f}s (100 steps)")
+            batch_start_time = time.time()  # Reset timer for next 100 steps
         step+=1
 
     # Save final checkpoint after training loop

@@ -119,7 +119,7 @@ def main():
         config = json.load(f)
     model = TransformerLM(config["vocab_size"], config["context_length"], config["d_model"], config["num_layers"], config["num_heads"], config["d_ff"], config["rope_theta"], None)
     
-    with open("checkpoints/tinystories/step_3660", "rb") as f:
+    with open("checkpoints/step_200000", "rb") as f:
         checkpoint = torch.load(f)
     model.load_state_dict(checkpoint["model_state_dict"])
 
